@@ -1,4 +1,3 @@
-import pipeline from 'transformers';
 import fs from 'fs';
 import * as tf from '@tensorflow/tfjs-node';
 
@@ -12,15 +11,76 @@ function readWordPool(filePath) {
     return wordPool.map(word => word.toLowerCase().replace(/[^a-z]/g, ''));
 }
 
+async function loadModelWithRetry(modelUrl, options, maxRetries = 3) {
+    let retries = 0;
+
+    while (retries < maxRetries) {
+        try {
+            return await tf.loadGraphModel(modelUrl, options);
+        } catch (error) {
+            console.error(`Error loading model (retry ${retries + 1}):`, error);
+            retries++;
+        }
+    }
+
+    throw new Error(`Failed to load model after ${maxRetries} retries`);
+}
+
 /**
- * Tokenize and obtain BERT embeddings for a given word.
+ * function to obtain BERT embeddings for a given word.
  * @param {string} word - The word to tokenize and obtain embeddings for.
  * @returns {number[]} - BERT embeddings for the word.
  */
 async function getBertEmbeddings(word) {
-    const nerPipeline = await pipeline('feature-extraction', { model: 'bert-base-uncased' });
-    const embeddings = await nerPipeline(word);
-    return embeddings[0]; // Assuming the first element of embeddings contains the features
+    try {
+        // Load the pre-trained BERT model with timeout handling
+        const modelPromise = loadModelWithRetry('https://tfhub.dev/google/bert_uncased_L-12_H-768_A-12/3', {
+            timeout: 10000
+        });
+
+        // Load the BERT tokenizer with timeout handling
+        const tokenizerPromise = loadModelWithRetry('https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3', {
+            timeout: 10000
+        });
+
+        // Wait for both models to load concurrently
+        const [model, tokenizer] = await Promise.all([modelPromise, tokenizerPromise]);
+
+        // Tokenize the input word
+        const [inputIds, inputMask] = tokenizer.tokenize([word]);
+
+        // Prepare the input for the model
+        const inputTensor = {
+            input_ids: tf.tensor(inputIds),
+            input_mask: tf.tensor(inputMask),
+            segment_ids: tf.zeros([1, inputIds.length]) // Assuming single sentence input
+        };
+
+        // Run the model and extract the embeddings
+        const embeddings = model.execute(inputTensor, 'pooled_output').arraySync();
+
+        return embeddings[0];
+    } catch (error) {
+        console.error('Error obtaining BERT embeddings:', error);
+        // Handle the error appropriately, e.g., retry, provide feedback to the user
+    }
+}
+
+
+
+/**
+ * Calculate the cosine similarity between two vectors.
+ * @param {number[]} vector1 - The first vector.
+ * @param {number[]} vector2 - The second vector.
+ * @returns {number} - Cosine similarity score.
+ */
+function calculateCosineSimilarity(vector1, vector2) {
+    const dotProduct = tf.tensor(vector1).dot(tf.tensor(vector2));
+    const norm1 = tf.tensor(vector1).norm();
+    const norm2 = tf.tensor(vector2).norm();
+
+    const similarity = dotProduct.div(norm1.mul(norm2)).dataSync()[0];
+    return similarity;
 }
 
 /**
@@ -29,20 +89,11 @@ async function getBertEmbeddings(word) {
  * @param {string} word2 - The second word.
  * @returns {number} - Semantic similarity score.
  */
-function calculateSemanticSimilarity(word1, word2) {
-    const embeddings1 = getBertEmbeddings(word1);
-    const embeddings2 = getBertEmbeddings(word2);
+async function calculateSemanticSimilarity(word1, word2) {
+    const embeddings1 = await getBertEmbeddings(word1);
+    const embeddings2 = await getBertEmbeddings(word2);
 
-    // Calculate cosine similarity between the embeddings
-    const dotProduct = tf.tensor(embeddings1).mul(tf.tensor(embeddings2)).sum();
-    const norm1 = tf.norm(tf.tensor(embeddings1));
-    const norm2 = tf.norm(tf.tensor(embeddings2));
-    const cosineSimilarity = dotProduct.div(tf.mul(norm1, norm2));
-
-    // Convert the TensorFlow tensor to a JavaScript number
-    const similarityScore = cosineSimilarity.arraySync();
-
-    return similarityScore;
+    return calculateCosineSimilarity(embeddings1, embeddings2);
 }
 
 /**
@@ -52,20 +103,19 @@ function calculateSemanticSimilarity(word1, word2) {
  * @returns {number} - Difficulty level.
  */
 function defineDifficultyLevel(similarityScore, scale = 3) {
-    // Define difficulty thresholds based on your specific requirements
-    const difficultyThresholds = [0.5, 0.7, 0.9];
+    const scaledScore = similarityScore * scale;
 
-    // Scale the similarity score to provide a larger range
-    const scaledSimilarity = similarityScore * scale;
+    // Define your difficulty thresholds based on your specific requirements
+    const hardThreshold = 0.7;
+    const mediumThreshold = 0.5;
 
-    // Map the scaled similarity score to the range [1, 2, 3]
-    for (let i = 0; i < difficultyThresholds.length; i++) {
-        if (scaledSimilarity >= difficultyThresholds[i]) {
-            return i + 1;
-        }
+    if (scaledScore >= hardThreshold) {
+        return 3; // High difficulty
+    } else if (scaledScore >= mediumThreshold) {
+        return 2; // Medium difficulty
+    } else {
+        return 1; // Low difficulty
     }
-
-    return difficultyThresholds.length + 1;
 }
 
 export { readWordPool, calculateSemanticSimilarity, defineDifficultyLevel };
