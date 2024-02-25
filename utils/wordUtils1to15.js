@@ -1,8 +1,6 @@
-// utils/wordUtils.js
-import natural from "natural";
-import fs from "fs";
-
-const DIFFICULTY_THRESHOLDS = [1, 2, 3];
+import pipeline from 'transformers';
+import fs from 'fs';
+import * as tf from '@tensorflow/tfjs-node';
 
 /**
  * Read a word pool from a file, convert to lowercase, and remove special characters.
@@ -15,30 +13,54 @@ function readWordPool(filePath) {
 }
 
 /**
- * Calculate the phonetic similarity between two words using Levenshtein distance.
- * @param {string} word1 - The first word.
- * @param {string} word2 - The second word.
- * @returns {number} - Phonetic similarity score.
+ * Tokenize and obtain BERT embeddings for a given word.
+ * @param {string} word - The word to tokenize and obtain embeddings for.
+ * @returns {number[]} - BERT embeddings for the word.
  */
-function calculatePhoneticSimilarity(word1, word2) {
-    const levenshteinDist = natural.LevenshteinDistance(word1, word2);
-    return 1 / (1 + levenshteinDist);
+async function getBertEmbeddings(word) {
+    const nerPipeline = await pipeline('feature-extraction', { model: 'bert-base-uncased' });
+    const embeddings = await nerPipeline(word);
+    return embeddings[0]; // Assuming the first element of embeddings contains the features
 }
 
 /**
- * Define difficulty level based on Levenshtein distance.
- * @param {number} levenshteinDistance - The Levenshtein distance between two words.
+ * Calculate the semantic similarity between two words using BERT embeddings.
+ * @param {string} word1 - The first word.
+ * @param {string} word2 - The second word.
+ * @returns {number} - Semantic similarity score.
+ */
+function calculateSemanticSimilarity(word1, word2) {
+    const embeddings1 = getBertEmbeddings(word1);
+    const embeddings2 = getBertEmbeddings(word2);
+
+    // Calculate cosine similarity between the embeddings
+    const dotProduct = tf.tensor(embeddings1).mul(tf.tensor(embeddings2)).sum();
+    const norm1 = tf.norm(tf.tensor(embeddings1));
+    const norm2 = tf.norm(tf.tensor(embeddings2));
+    const cosineSimilarity = dotProduct.div(tf.mul(norm1, norm2));
+
+    // Convert the TensorFlow tensor to a JavaScript number
+    const similarityScore = cosineSimilarity.arraySync();
+
+    return similarityScore;
+}
+
+/**
+ * Define difficulty level based on semantic similarity.
+ * @param {number} similarityScore - The semantic similarity score between two words.
+ * @param {number} scale - Scaling factor for difficulty thresholds.
  * @returns {number} - Difficulty level.
  */
-function defineDifficultyLevel(levenshteinDistance, scale = 3) {
-    const difficultyThresholds = [1, 2, 3];
+function defineDifficultyLevel(similarityScore, scale = 3) {
+    // Define difficulty thresholds based on your specific requirements
+    const difficultyThresholds = [0.5, 0.7, 0.9];
 
-    // Scale the distances to provide a larger range
-    const scaledDistance = Math.round((levenshteinDistance * scale) * 100) - 23;
+    // Scale the similarity score to provide a larger range
+    const scaledSimilarity = similarityScore * scale;
 
-    // Map the max distance to the range [1, 2, 3]
+    // Map the scaled similarity score to the range [1, 2, 3]
     for (let i = 0; i < difficultyThresholds.length; i++) {
-        if (scaledDistance <= difficultyThresholds[i]) {
+        if (scaledSimilarity >= difficultyThresholds[i]) {
             return i + 1;
         }
     }
@@ -46,6 +68,4 @@ function defineDifficultyLevel(levenshteinDistance, scale = 3) {
     return difficultyThresholds.length + 1;
 }
 
-
-
-export { readWordPool, calculatePhoneticSimilarity, defineDifficultyLevel };
+export { readWordPool, calculateSemanticSimilarity, defineDifficultyLevel };
