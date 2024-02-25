@@ -1,5 +1,6 @@
 import fs from 'fs';
 import * as tf from '@tensorflow/tfjs-node';
+import * as use from '@tensorflow-models/universal-sentence-encoder';
 
 /**
  * Read a word pool from a file, convert to lowercase, and remove special characters.
@@ -11,12 +12,12 @@ function readWordPool(filePath) {
     return wordPool.map(word => word.toLowerCase().replace(/[^a-z]/g, ''));
 }
 
-async function loadModelWithRetry(modelUrl, options, maxRetries = 3) {
+async function loadModelWithRetry(modelLoadFunction, maxRetries = 3) {
     let retries = 0;
 
     while (retries < maxRetries) {
         try {
-            return await tf.loadGraphModel(modelUrl, options);
+            return await modelLoadFunction();
         } catch (error) {
             console.error(`Error loading model (retry ${retries + 1}):`, error);
             retries++;
@@ -27,45 +28,23 @@ async function loadModelWithRetry(modelUrl, options, maxRetries = 3) {
 }
 
 /**
- * function to obtain BERT embeddings for a given word.
- * @param {string} word - The word to tokenize and obtain embeddings for.
- * @returns {number[]} - BERT embeddings for the word.
+ * Function to obtain USE embeddings for a given word.
+ * @param {string} word - The word to obtain embeddings for.
+ * @returns {number[]} - USE embeddings for the word.
  */
-async function getBertEmbeddings(word) {
+async function getUseEmbeddings(word) {
     try {
-        // Load the pre-trained BERT model with timeout handling
-        const modelPromise = loadModelWithRetry('https://tfhub.dev/google/bert_uncased_L-12_H-768_A-12/3', {
-            timeout: 10000
-        });
+        console.log('Loading USE model...');
+        const model = await loadModelWithRetry(() => use.load());
+        console.log('USE model loaded successfully.');
 
-        // Load the BERT tokenizer with timeout handling
-        const tokenizerPromise = loadModelWithRetry('https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3', {
-            timeout: 10000
-        });
-
-        // Wait for both models to load concurrently
-        const [model, tokenizer] = await Promise.all([modelPromise, tokenizerPromise]);
-
-        // Tokenize the input word
-        const [inputIds, inputMask] = tokenizer.tokenize([word]);
-
-        // Prepare the input for the model
-        const inputTensor = {
-            input_ids: tf.tensor(inputIds),
-            input_mask: tf.tensor(inputMask),
-            segment_ids: tf.zeros([1, inputIds.length]) // Assuming single sentence input
-        };
-
-        // Run the model and extract the embeddings
-        const embeddings = model.execute(inputTensor, 'pooled_output').arraySync();
-
-        return embeddings[0];
+        const embeddings = await model.embed([word]);
+        return embeddings.arraySync();
     } catch (error) {
-        console.error('Error obtaining BERT embeddings:', error);
-        // Handle the error appropriately, e.g., retry, provide feedback to the user
+        console.error('Error obtaining USE embeddings:', error);
+        // Handle the error appropriately
     }
 }
-
 
 
 /**
@@ -84,14 +63,14 @@ function calculateCosineSimilarity(vector1, vector2) {
 }
 
 /**
- * Calculate the semantic similarity between two words using BERT embeddings.
+ * Calculate the semantic similarity between two words using USE embeddings.
  * @param {string} word1 - The first word.
  * @param {string} word2 - The second word.
  * @returns {number} - Semantic similarity score.
  */
 async function calculateSemanticSimilarity(word1, word2) {
-    const embeddings1 = await getBertEmbeddings(word1);
-    const embeddings2 = await getBertEmbeddings(word2);
+    const embeddings1 = await getUseEmbeddings(word1);
+    const embeddings2 = await getUseEmbeddings(word2);
 
     return calculateCosineSimilarity(embeddings1, embeddings2);
 }
